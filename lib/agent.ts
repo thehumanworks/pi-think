@@ -8,17 +8,17 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { getModel, type Model } from "@earendil-works/pi-ai";
+import {
+  THINK_AGENT_MODEL,
+  THINK_AGENT_PROVIDER,
+  type ThinkAgentThinkingLevel,
+} from "../constants";
 
-export const THINK_AGENT_PROVIDER = "xai-auth";
-export const THINK_AGENT_MODEL = "grok-composer-2.5-fast";
-
-export type ThinkAgentThinkingLevel =
-  | "off"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh";
+export {
+  THINK_AGENT_MODEL,
+  THINK_AGENT_PROVIDER,
+  type ThinkAgentThinkingLevel,
+} from "../constants";
 
 export interface ThinkLens {
   /** Stable identifier used in details/labels. */
@@ -234,6 +234,7 @@ export class ThinkAgent {
     }
 
     const systemPrompt = options.systemPrompt ?? THINK_AGENT_SYSTEM_PROMPT;
+    const thinkingLevel = options.thinkingLevel ?? "off";
 
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: false },
@@ -257,9 +258,7 @@ export class ThinkAgent {
       agentDir,
       model,
       modelRegistry: options.modelRegistry,
-      ...(options.thinkingLevel !== undefined
-        ? { thinkingLevel: options.thinkingLevel }
-        : {}),
+      thinkingLevel,
       noTools: "all",
       resourceLoader,
       sessionManager: SessionManager.inMemory(cwd),

@@ -1,9 +1,25 @@
 #!/usr/bin/env bun
-import { executeThinkAgent, THINK_TOOL_DEFAULT_MODEL, type ThinkParams } from "./index";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  PI_THINK_VERSION,
+  THINKING_LEVELS,
+  THINK_TOOL_DEFAULT_MODEL,
+  type ThinkAgentThinkingLevel,
+} from "./constants";
 
-const VALID_THINKING = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const VALID_THINKING = new Set<string>(THINKING_LEVELS);
 
-export interface ThinkCliOptions extends ThinkParams {
+export interface ThinkCliParams {
+  prompt: string;
+  model?: string;
+  thinking?: ThinkAgentThinkingLevel;
+  agents?: number;
+}
+
+export interface ThinkCliOptions extends ThinkCliParams {
   json?: boolean;
 }
 
@@ -13,7 +29,28 @@ export interface ThinkCliResult {
   stderr?: string;
 }
 
-export type ThinkCliExecute = typeof executeThinkAgent;
+export type ThinkCliExecute = (
+  params: ThinkCliParams,
+  options: { cwd?: string; modelRegistry?: unknown },
+) => Promise<{
+  content: Array<{ type: string; text?: string }>;
+  details: { error?: string };
+}>;
+
+interface ThinkCliRuntime {
+  execute: ThinkCliExecute;
+  modelRegistry?: unknown;
+}
+
+interface PiRuntimeServices {
+  agentDir?: string;
+  modelRegistry?: unknown;
+  resourceLoader?: {
+    getExtensions?: () => {
+      extensions?: Array<{ path?: string }>;
+    };
+  };
+}
 
 function usage(): string {
   return `pi-think — run the pi think tool from the command line
@@ -36,10 +73,212 @@ Options:
 function readVersion(): string {
   try {
     const packageJson = require("./package.json") as { version?: string };
-    return packageJson.version ?? "0.0.0";
+    return packageJson.version ?? PI_THINK_VERSION;
   } catch {
-    return "0.0.0";
+    return PI_THINK_VERSION;
   }
+}
+
+function expandTildePath(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return homedir() + path.slice(1);
+  return path;
+}
+
+function packageExists(dir: string): boolean {
+  return existsSync(join(expandTildePath(dir), "package.json"));
+}
+
+function readJsonFile<T>(path: string): T | undefined {
+  try {
+    return JSON.parse(readFileSync(path, "utf-8")) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+function packageNameFromNpmSource(source: string): string | undefined {
+  if (!source.startsWith("npm:")) return undefined;
+  const spec = source.slice("npm:".length).trim();
+  const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/);
+  return match?.[1];
+}
+
+function packageNameFromNodeModulesPath(path: string): string | undefined {
+  const marker = `${sep}node_modules${sep}`;
+  const markerIndex = path.lastIndexOf(marker);
+  if (markerIndex === -1) return undefined;
+  const parts = path.slice(markerIndex + marker.length).split(/[\\/]/);
+  const first = parts[0];
+  if (!first) return undefined;
+  if (first.startsWith("@")) {
+    const second = parts[1];
+    return second ? `${first}/${second}` : undefined;
+  }
+  return first;
+}
+
+function configuredNpmPackageNames(agentDir: string): string[] {
+  const settings = readJsonFile<{
+    packages?: Array<string | { source?: string }>;
+  }>(join(agentDir, "settings.json"));
+  const names = new Set<string>();
+
+  for (const entry of settings?.packages ?? []) {
+    const source = typeof entry === "string" ? entry : entry.source;
+    if (!source) continue;
+    const name = packageNameFromNpmSource(source);
+    if (name) names.add(name);
+  }
+
+  return [...names];
+}
+
+function configuredPackageRootsFromBase(
+  baseDir: string,
+  loadedNames: Set<string>,
+): string[] {
+  const roots: string[] = [];
+  for (const name of configuredNpmPackageNames(baseDir)) {
+    if (loadedNames.has(name)) continue;
+    const root = join(baseDir, "npm", "node_modules", name);
+    if (packageExists(root)) roots.push(root);
+  }
+  return roots;
+}
+
+function loadedPackageNames(services: PiRuntimeServices): Set<string> {
+  const names = new Set<string>();
+  for (const extension of services.resourceLoader?.getExtensions?.().extensions ?? []) {
+    if (!extension.path) continue;
+    const name = packageNameFromNodeModulesPath(extension.path);
+    if (name) names.add(name);
+  }
+  return names;
+}
+
+export function configuredFallbackPackageRoots(
+  agentDir: string,
+  loadedNames = new Set<string>(),
+  cwd?: string,
+): string[] {
+  const roots = configuredPackageRootsFromBase(agentDir, loadedNames);
+  if (cwd) {
+    roots.push(
+      ...configuredPackageRootsFromBase(join(cwd, ".pi"), loadedNames),
+    );
+  }
+  return [...new Set(roots)];
+}
+
+function providerFromModelReference(modelReference?: string): string | undefined {
+  const reference = (modelReference ?? THINK_TOOL_DEFAULT_MODEL).trim();
+  const slashIndex = reference.indexOf("/");
+  if (slashIndex === -1) return THINK_TOOL_DEFAULT_MODEL.split("/")[0];
+  const provider = reference.slice(0, slashIndex).trim();
+  return provider || undefined;
+}
+
+function registryHasProvider(
+  modelRegistry: unknown,
+  provider: string | undefined,
+): boolean {
+  if (!provider) return true;
+  const getAll = (modelRegistry as { getAll?: () => Array<{ provider?: string }> } | undefined)
+    ?.getAll;
+  if (typeof getAll !== "function") return false;
+  const normalizedProvider = provider.toLowerCase();
+  return getAll.call(modelRegistry).some(
+    (model) => model.provider?.toLowerCase() === normalizedProvider,
+  );
+}
+
+function findPiSdkPackageDir(startDir: string): string | undefined {
+  let dir = startDir;
+  while (dir !== dirname(dir)) {
+    const candidate = join(
+      dir,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+    );
+    if (packageExists(candidate)) {
+      return candidate;
+    }
+    dir = dirname(dir);
+  }
+  return undefined;
+}
+
+function currentSourceDir(): string | undefined {
+  try {
+    return dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return undefined;
+  }
+}
+
+export function configurePiSdkPackageDir(cwd: string): void {
+  const configuredPackageDir = process.env.PI_PACKAGE_DIR;
+  if (configuredPackageDir && packageExists(configuredPackageDir)) {
+    return;
+  }
+
+  const homeExtensionDir = join(
+    homedir(),
+    ".pi",
+    "agent",
+    "extensions",
+    "pi-think",
+  );
+  const searchRoots = [
+    cwd,
+    process.cwd(),
+    currentSourceDir(),
+    homeExtensionDir,
+  ].filter((dir): dir is string => !!dir);
+
+  for (const root of searchRoots) {
+    const candidate = findPiSdkPackageDir(root);
+    if (candidate) {
+      process.env.PI_PACKAGE_DIR = candidate;
+      return;
+    }
+  }
+}
+
+async function defaultThinkCliRuntime(
+  cwd: string,
+  params: ThinkCliParams,
+): Promise<ThinkCliRuntime> {
+  configurePiSdkPackageDir(cwd);
+  const [{ executeThinkAgent }, piSdk] = await Promise.all([
+    import("./index"),
+    import("@earendil-works/pi-coding-agent"),
+  ]);
+  let services = (await piSdk.createAgentSessionServices({ cwd })) as PiRuntimeServices;
+  const provider = providerFromModelReference(params.model);
+
+  if (!registryHasProvider(services.modelRegistry, provider)) {
+    const fallbackRoots = configuredFallbackPackageRoots(
+      services.agentDir ?? join(homedir(), ".pi", "agent"),
+      loadedPackageNames(services),
+      cwd,
+    );
+    if (fallbackRoots.length > 0) {
+      services = (await piSdk.createAgentSessionServices({
+        cwd,
+        resourceLoaderOptions: {
+          additionalExtensionPaths: fallbackRoots,
+        },
+      })) as PiRuntimeServices;
+    }
+  }
+
+  return {
+    execute: executeThinkAgent as ThinkCliExecute,
+    modelRegistry: services.modelRegistry,
+  };
 }
 
 async function readStdinIfAvailable(stdin: Pick<typeof Bun.stdin, "text">): Promise<string> {
@@ -107,7 +346,7 @@ export function parseThinkCliArgs(argv: string[]):
       if (!VALID_THINKING.has(value)) {
         return { kind: "error", message: `invalid thinking level: ${value}` };
       }
-      options.thinking = value as ThinkParams["thinking"];
+      options.thinking = value as ThinkAgentThinkingLevel;
       continue;
     }
 
@@ -163,9 +402,14 @@ export async function runThinkCli(
   }
 
   const { json, ...rest } = parsed.options;
-  const params: ThinkParams = { ...rest, prompt };
-  const result = await (deps.execute ?? executeThinkAgent)(params, {
-    cwd: deps.cwd ?? process.cwd(),
+  const params: ThinkCliParams = { ...rest, prompt };
+  const cwd = deps.cwd ?? process.cwd();
+  const runtime = deps.execute
+    ? { execute: deps.execute }
+    : await defaultThinkCliRuntime(cwd, params);
+  const result = await runtime.execute(params, {
+    cwd,
+    modelRegistry: runtime.modelRegistry,
   });
 
   if (json) {

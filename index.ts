@@ -1,4 +1,4 @@
-import { getModel, type Model } from "@earendil-works/pi-ai";
+import { getModel, getModels, type Model } from "@earendil-works/pi-ai";
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
+import { THINK_TOOL_DEFAULT_MODEL } from "./constants";
 import {
   assignThinkLenses,
   buildThinkSystemPrompt,
@@ -17,8 +18,7 @@ import {
   type ThinkAgentRunResult,
   type ThinkLens,
 } from "./lib/agent";
-
-export const THINK_TOOL_DEFAULT_MODEL = `${THINK_AGENT_PROVIDER}/${THINK_AGENT_MODEL}`;
+export { THINK_TOOL_DEFAULT_MODEL } from "./constants";
 
 const ThinkThinkingLevelSchema = Type.Union(
   [
@@ -276,6 +276,15 @@ function registryFindById(
   return modelRegistry.getAll().find((m) => m.id === modelId);
 }
 
+function registryGetAll(
+  modelRegistry: ModelRegistry | undefined,
+): Model<any>[] {
+  if (typeof modelRegistry?.getAll !== "function") {
+    return [];
+  }
+  return modelRegistry.getAll();
+}
+
 /** Runtime model lookup; tool `model` is a free-form provider/id string. */
 function lookupBuiltInModel(
   provider: string,
@@ -284,6 +293,45 @@ function lookupBuiltInModel(
   return (
     getModel as (p: string, id: string) => Model<any> | undefined
   )(provider, modelId);
+}
+
+function lookupBuiltInProviderModels(provider: string): Model<any>[] {
+  return (getModels as (p: string) => Model<any>[])(provider);
+}
+
+function findModelByReference(
+  models: Model<any>[],
+  provider: string,
+  modelId: string,
+): Model<any> | undefined {
+  const normalizedProvider = provider.toLowerCase();
+  const normalizedModelId = modelId.toLowerCase();
+  return models.find(
+    (model) =>
+      model.provider.toLowerCase() === normalizedProvider &&
+      model.id.toLowerCase() === normalizedModelId,
+  );
+}
+
+function buildProviderFallbackModel(
+  models: Model<any>[],
+  provider: string,
+  modelId: string,
+): Model<any> | undefined {
+  const normalizedProvider = provider.toLowerCase();
+  const baseModel = models.find(
+    (model) => model.provider.toLowerCase() === normalizedProvider,
+  );
+  if (!baseModel) {
+    return undefined;
+  }
+
+  return {
+    ...baseModel,
+    provider: baseModel.provider,
+    id: modelId,
+    name: modelId,
+  };
 }
 
 export function resolveThinkModel(
@@ -300,9 +348,15 @@ export function resolveThinkModel(
       return undefined;
     }
 
+    const registryModels = registryGetAll(modelRegistry);
+    const builtInModels = lookupBuiltInProviderModels(provider);
     return (
       registryFind(modelRegistry, provider, modelId) ??
-      lookupBuiltInModel(provider, modelId)
+      findModelByReference(registryModels, provider, modelId) ??
+      lookupBuiltInModel(provider, modelId) ??
+      findModelByReference(builtInModels, provider, modelId) ??
+      buildProviderFallbackModel(registryModels, provider, modelId) ??
+      buildProviderFallbackModel(builtInModels, provider, modelId)
     );
   }
 
@@ -410,6 +464,7 @@ export async function executeThinkAgent(
 ): Promise<AgentToolResult<ThinkDetails>> {
   const modelReference = params.model ?? THINK_TOOL_DEFAULT_MODEL;
   const thinkingLevel = params.thinking;
+  const sessionThinkingLevel = thinkingLevel ?? "off";
   const panelSize = clampPanelSize(params.agents);
   const lenses = assignThinkLenses(panelSize);
 
@@ -438,7 +493,7 @@ export async function executeThinkAgent(
           cwd: options.cwd,
           model,
           modelRegistry: options.modelRegistry,
-          thinkingLevel,
+          thinkingLevel: sessionThinkingLevel,
           signal: options.signal,
         }),
       ),

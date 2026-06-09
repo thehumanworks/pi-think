@@ -4,6 +4,7 @@ import {
   clampPanelSize,
   default as thinkExtension,
   executeThinkAgent,
+  resolveThinkModel,
   THINK_TOOL_DEFAULT_MODEL,
   type ThinkAgentRunner,
   type ThinkParams,
@@ -23,21 +24,37 @@ import {
   type ThinkAgentThinkingLevel,
 } from "./lib/agent";
 
+function makeMockModel(provider: string, id: string) {
+  return {
+    provider,
+    id,
+    name: id,
+    api: "openai-completions",
+    baseUrl: "https://example.invalid/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 4096,
+  } as const;
+}
+
 const defaultThinkModel = {
   provider: THINK_AGENT_PROVIDER,
   id: THINK_AGENT_MODEL,
 } as const;
 
-function mockThinkModelRegistry() {
+function mockThinkModelRegistry(
+  models = [makeMockModel(defaultThinkModel.provider, defaultThinkModel.id)],
+) {
   return {
     find(provider: string, modelId: string) {
-      if (
-        provider === defaultThinkModel.provider &&
-        modelId === defaultThinkModel.id
-      ) {
-        return defaultThinkModel;
-      }
-      return undefined;
+      return models.find(
+        (model) => model.provider === provider && model.id === modelId,
+      );
+    },
+    getAll() {
+      return models;
     },
   } as never;
 }
@@ -241,6 +258,35 @@ describe("pi-think CLI wrapper", () => {
 });
 
 describe("executeThinkAgent", () => {
+  test("resolves canonical provider/model references without changing provider", () => {
+    const registry = mockThinkModelRegistry([
+      makeMockModel("openai-codex", "gpt-5.5"),
+      makeMockModel("xai-auth", "grok-composer-2.5-fast"),
+    ]);
+
+    expect(
+      resolveThinkModel("xai-auth/grok-composer-2.5-fast", registry),
+    ).toMatchObject({
+      provider: "xai-auth",
+      id: "grok-composer-2.5-fast",
+    });
+    expect(resolveThinkModel("openai-codex/gpt-5.5", registry)).toMatchObject({
+      provider: "openai-codex",
+      id: "gpt-5.5",
+    });
+  });
+
+  test("builds a provider-scoped fallback model for explicit unknown model ids", () => {
+    const registry = mockThinkModelRegistry([
+      makeMockModel("xai-auth", "known-xai-model"),
+    ]);
+
+    expect(resolveThinkModel("xai-auth/new-model-id", registry)).toMatchObject({
+      provider: "xai-auth",
+      id: "new-model-id",
+    });
+  });
+
   test("single critic returns its raw JSON and round-trips details", async () => {
     const signal = new AbortController().signal;
     const modelRegistry = mockThinkModelRegistry();
@@ -257,6 +303,7 @@ describe("executeThinkAgent", () => {
     expect(mock.inits).toHaveLength(1);
     expect(mock.inits[0]?.cwd).toBe("/tmp/project");
     expect(mock.inits[0]?.modelRegistry).toBe(modelRegistry);
+    expect(mock.inits[0]?.thinkingLevel).toBe("off");
     expect(mock.inits[0]?.systemPrompt).toContain("Adversarial Critic");
     expect(mock.disposeCount).toBe(1);
 
@@ -490,7 +537,7 @@ describe("executeThinkAgent", () => {
       );
 
       expect(initCalls[0]?.cwd).toBe("/tmp/repo");
-      expect(initCalls[0]?.thinkingLevel).toBeUndefined();
+      expect(initCalls[0]?.thinkingLevel).toBe("off");
       expect(initCalls[0]?.systemPrompt).toContain("Adversarial Critic");
       expect(updates).toEqual([
         {

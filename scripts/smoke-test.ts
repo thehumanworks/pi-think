@@ -118,11 +118,11 @@ const snap = initSnapshots[0] as {
   provider?: string;
 };
 if (
-  snap?.thinkingLevel !== undefined ||
+  snap?.thinkingLevel !== "off" ||
   snap?.provider !== THINK_AGENT_PROVIDER ||
   snap?.modelId !== THINK_AGENT_MODEL
 ) {
-  console.error("FAIL: init options (expected no thinkingLevel)", snap);
+  console.error("FAIL: init options (expected thinkingLevel off)", snap);
   process.exit(1);
 }
 
