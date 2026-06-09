@@ -1,0 +1,16 @@
+{
+  "agents": [
+    {
+      "name": "Friendly Smoke Critic",
+      "appendSystemPrompt": "Keep the critique very short and mention the alias Friendly Smoke Critic in the JSON bottom_line.",
+      "model": "xai-auth/grok-composer-2.5-fast",
+      "effort": "off"
+    },
+    {
+      "name": "Strict Smoke Critic",
+      "appendSystemPrompt": "Keep the critique very short and mention the alias Strict Smoke Critic in the JSON bottom_line.",
+      "model": "xai-auth/grok-composer-2.5-fast",
+      "effort": "off"
+    }
+  ]
+}

@@ -17,6 +17,8 @@ export interface ThinkCliParams {
   model?: string;
   thinking?: ThinkAgentThinkingLevel;
   agents?: number;
+  panel?: string;
+  agentConfig?: string;
 }
 
 export interface ThinkCliOptions extends ThinkCliParams {
@@ -64,6 +66,9 @@ Options:
   -m, --model <provider/id> Model for the sub-agent(s) (default: ${THINK_TOOL_DEFAULT_MODEL})
   -t, --thinking <level>    off|minimal|low|medium|high|xhigh
   -a, --agents <count>      Panel size, clamped by the underlying think tool
+      --panel <name|path>    Load .agents/think/<name>.json or an explicit JSON file
+      --agent-config <json|path>
+                             Inline JSON config or path to { agents: [...] }
       --json                Print the full tool result as JSON
   -h, --help                Show this help
       --version             Show package version
@@ -259,7 +264,11 @@ async function defaultThinkCliRuntime(
   let services = (await piSdk.createAgentSessionServices({ cwd })) as PiRuntimeServices;
   const provider = providerFromModelReference(params.model);
 
-  if (!registryHasProvider(services.modelRegistry, provider)) {
+  if (
+    params.panel !== undefined ||
+    params.agentConfig !== undefined ||
+    !registryHasProvider(services.modelRegistry, provider)
+  ) {
     const fallbackRoots = configuredFallbackPackageRoots(
       services.agentDir ?? join(homedir(), ".pi", "agent"),
       loadedPackageNames(services),
@@ -358,6 +367,20 @@ export function parseThinkCliArgs(argv: string[]):
         return { kind: "error", message: `invalid agents count: ${value}` };
       }
       options.agents = agents;
+      continue;
+    }
+
+    if (arg === "--panel") {
+      const value = readValue(arg);
+      if (value === undefined) return { kind: "error", message: `${arg} requires a value` };
+      options.panel = value;
+      continue;
+    }
+
+    if (arg === "--agent-config") {
+      const value = readValue(arg);
+      if (value === undefined) return { kind: "error", message: `${arg} requires a value` };
+      options.agentConfig = value;
       continue;
     }
 

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { getModel, getModels, type Model } from "@earendil-works/pi-ai";
 import {
   type AgentToolResult,
@@ -6,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
-import { THINK_TOOL_DEFAULT_MODEL } from "./constants";
+import { THINKING_LEVELS, THINK_TOOL_DEFAULT_MODEL, type ThinkAgentThinkingLevel } from "./constants";
 import {
   assignThinkLenses,
   buildThinkSystemPrompt,
@@ -220,6 +222,18 @@ const ThinkParams = Type.Object({
       description: `Panel size: number of independent adversarial critics, each given a distinct expert lens, run in parallel (default 1; max ${MAX_THINK_AGENTS}). Use 3 for real decisions or high-blast-radius execution, 4-6 for the highest-stakes multi-faceted calls. Latency ≈ one critic; token cost scales with the count.`,
     }),
   ),
+  panel: Type.Optional(
+    Type.String({
+      description:
+        "Named panel config to load from .agents/think/<name>.json (or an explicit JSON file path). Mutually exclusive with agents.",
+    }),
+  ),
+  agentConfig: Type.Optional(
+    Type.Any({
+      description:
+        "Structured think-agent config, either an inline JSON object/string or a path to a JSON file with { agents: [...] }. Mutually exclusive with agents.",
+    }),
+  ),
 });
 
 export type ThinkParams = Static<typeof ThinkParams>;
@@ -233,11 +247,38 @@ export interface ThinkPanelEntry {
   error?: string;
 }
 
+export interface ThinkPanelAgentConfig {
+  name?: string;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
+  model?: string;
+  effort?: ThinkAgentThinkingLevel;
+  outputFormat?: unknown;
+}
+
+export interface ThinkPanelConfig {
+  agents: ThinkPanelAgentConfig[];
+}
+
+interface NormalizedThinkPanelAgent {
+  name: string;
+  lens: ThinkLens;
+  modelReference: string;
+  thinkingLevel: ThinkAgentThinkingLevel;
+  systemPrompt: string;
+}
+
+interface NormalizedThinkPanel {
+  agents: NormalizedThinkPanelAgent[];
+  source?: string;
+}
+
 export interface ThinkDetails {
   prompt: string;
   model?: string;
   thinkingLevel?: string;
   agents?: number;
+  panelConfigSource?: string;
   panel?: ThinkPanelEntry[];
   output?: string;
   error?: string;
@@ -254,6 +295,127 @@ export interface ThinkAgentRunner {
 export type CreateThinkAgent = (
   options: ThinkAgentInitOptions,
 ) => Promise<ThinkAgentRunner>;
+
+function looksLikeJson(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+function readJsonConfig(path: string): unknown {
+  return JSON.parse(readFileSync(path, "utf-8"));
+}
+
+function resolveConfigPath(reference: string, cwd: string): string {
+  const expanded = reference.startsWith("~/")
+    ? `${process.env.HOME ?? ""}${reference.slice(1)}`
+    : reference;
+  return resolve(cwd, expanded);
+}
+
+function resolvePanelPath(panel: string, cwd: string): string {
+  if (panel.endsWith(".json") || panel.includes("/")) {
+    return resolveConfigPath(panel, cwd);
+  }
+  return resolve(cwd, ".agents", "think", `${panel}.json`);
+}
+
+function loadConfigInput(input: unknown, cwd: string, sourceHint?: string): { value: unknown; source?: string; baseDir: string } {
+  if (input && typeof input === "object") {
+    return { value: input, source: sourceHint, baseDir: cwd };
+  }
+  if (typeof input !== "string" || input.trim() === "") {
+    throw new Error("agentConfig must be an object, inline JSON string, or JSON file path");
+  }
+  if (looksLikeJson(input)) {
+    return { value: JSON.parse(input), source: sourceHint ?? "inline JSON", baseDir: cwd };
+  }
+  const path = resolveConfigPath(input, cwd);
+  return { value: readJsonConfig(path), source: path, baseDir: dirname(path) };
+}
+
+function loadOutputFormat(outputFormat: unknown, baseDir: string): unknown {
+  if (typeof outputFormat !== "string") return outputFormat;
+  if (looksLikeJson(outputFormat)) return JSON.parse(outputFormat);
+  const path = resolveConfigPath(outputFormat, baseDir);
+  return readJsonConfig(path);
+}
+
+function isThinkingLevel(value: unknown): value is ThinkAgentThinkingLevel {
+  return typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+function assertPlainObject(value: unknown, label: string): asserts value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+}
+
+function formatOutputFormatInstruction(outputFormat: unknown): string {
+  return `
+
+## Output format
+Return output conforming to this JSON schema/configuration exactly:
+${JSON.stringify(outputFormat, null, 2)}`;
+}
+
+export function resolveThinkPanelConfig(
+  params: Pick<ThinkParams, "agentConfig" | "panel" | "agents" | "model" | "thinking">,
+  cwd = process.cwd(),
+): NormalizedThinkPanel | undefined {
+  if (params.agentConfig === undefined && params.panel === undefined) return undefined;
+  if (params.agents !== undefined) {
+    throw new Error("agents cannot be combined with agentConfig or panel");
+  }
+  if (params.agentConfig !== undefined && params.panel !== undefined) {
+    throw new Error("agentConfig and panel are mutually exclusive");
+  }
+
+  let loaded: { value: unknown; source?: string; baseDir: string };
+  if (params.panel !== undefined) {
+    const path = resolvePanelPath(params.panel, cwd);
+    loaded = { value: readJsonConfig(path), source: path, baseDir: dirname(path) };
+  } else {
+    loaded = loadConfigInput(params.agentConfig, cwd);
+  }
+
+  assertPlainObject(loaded.value, "agent config");
+  const rawAgents = loaded.value.agents;
+  if (!Array.isArray(rawAgents) || rawAgents.length === 0) {
+    throw new Error("agent config must contain a non-empty agents array");
+  }
+  if (rawAgents.length > MAX_THINK_AGENTS) {
+    throw new Error(`agent config supports at most ${MAX_THINK_AGENTS} agents`);
+  }
+
+  const lenses = assignThinkLenses(rawAgents.length);
+  const agents = rawAgents.map((raw, index): NormalizedThinkPanelAgent => {
+    assertPlainObject(raw, `agent config agents[${index}]`);
+    const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : lenses[index]!.title;
+    const systemPrompt = typeof raw.systemPrompt === "string" && raw.systemPrompt.trim() ? raw.systemPrompt : undefined;
+    const appendSystemPrompt = typeof raw.appendSystemPrompt === "string" && raw.appendSystemPrompt.trim() ? raw.appendSystemPrompt : undefined;
+    if (systemPrompt && appendSystemPrompt) {
+      throw new Error(`agent config agent ${name} cannot set both systemPrompt and appendSystemPrompt`);
+    }
+    const effort = raw.effort;
+    if (effort !== undefined && !isThinkingLevel(effort)) {
+      throw new Error(`agent config agent ${name} has invalid effort: ${String(effort)}`);
+    }
+    const modelReference = typeof raw.model === "string" && raw.model.trim()
+      ? raw.model.trim()
+      : params.model ?? THINK_TOOL_DEFAULT_MODEL;
+    const thinkingLevel = (effort ?? params.thinking ?? "off") as ThinkAgentThinkingLevel;
+    let prompt = systemPrompt ?? buildThinkSystemPrompt(lenses[index], rawAgents.length);
+    if (appendSystemPrompt) prompt = `${prompt}
+
+${appendSystemPrompt}`;
+    if (raw.outputFormat !== undefined) {
+      prompt += formatOutputFormatInstruction(loadOutputFormat(raw.outputFormat, loaded.baseDir));
+    }
+    return { name, lens: lenses[index]!, modelReference, thinkingLevel, systemPrompt: prompt };
+  });
+
+  return { agents, source: loaded.source };
+}
 
 function registryFind(
   modelRegistry: ModelRegistry | undefined,
@@ -384,7 +546,8 @@ interface RunPanelistOptions {
   cwd?: string;
   model: Model<any>;
   modelRegistry?: ModelRegistry;
-  thinkingLevel?: ThinkParams["thinking"];
+  thinkingLevel?: ThinkAgentThinkingLevel;
+  systemPrompt?: string;
   signal?: AbortSignal;
 }
 
@@ -408,7 +571,7 @@ async function runPanelist(
       ...(options.thinkingLevel !== undefined
         ? { thinkingLevel: options.thinkingLevel }
         : {}),
-      systemPrompt: buildThinkSystemPrompt(lens, panelSize),
+      systemPrompt: options.systemPrompt ?? buildThinkSystemPrompt(lens, panelSize),
     });
 
     return await agent.run(prompt, { signal: options.signal });
@@ -462,13 +625,11 @@ export async function executeThinkAgent(
   params: ThinkParams,
   options: ExecuteThinkAgentOptions = {},
 ): Promise<AgentToolResult<ThinkDetails>> {
-  const modelReference = params.model ?? THINK_TOOL_DEFAULT_MODEL;
-  const thinkingLevel = params.thinking;
-  const sessionThinkingLevel = thinkingLevel ?? "off";
-  const panelSize = clampPanelSize(params.agents);
-  const lenses = assignThinkLenses(panelSize);
-
-  const details: ThinkDetails = {
+  const cwd = options.cwd ?? process.cwd();
+  let modelReference = params.model ?? THINK_TOOL_DEFAULT_MODEL;
+  let thinkingLevel = params.thinking;
+  let panelSize = clampPanelSize(params.agents);
+  let details: ThinkDetails = {
     prompt: params.prompt,
     model: modelReference,
     agents: panelSize,
@@ -480,39 +641,68 @@ export async function executeThinkAgent(
       throw new Error("Think panel run was cancelled before it started");
     }
 
-    const model = resolveThinkModel(modelReference, options.modelRegistry);
-    if (!model) {
-      throw new Error(`Unable to find Pi model ${modelReference}`);
-    }
-
+    const configuredPanel = resolveThinkPanelConfig(params, cwd);
     const createAgent = options.createAgent ?? ThinkAgent.init;
 
+    const panelAgents = configuredPanel?.agents ?? assignThinkLenses(panelSize).map((lens) => ({
+      name: lens.title,
+      lens,
+      modelReference,
+      thinkingLevel: (thinkingLevel ?? "off") as ThinkAgentThinkingLevel,
+      systemPrompt: buildThinkSystemPrompt(lens, panelSize),
+    }));
+
+    panelSize = panelAgents.length;
+    modelReference = panelAgents[0]?.modelReference ?? modelReference;
+    const distinctEfforts = new Set(panelAgents.map((agent) => agent.thinkingLevel));
+    const configuredThinking = configuredPanel
+      ? distinctEfforts.size === 1
+        ? panelAgents[0]?.thinkingLevel
+        : "mixed"
+      : undefined;
+    details = {
+      prompt: params.prompt,
+      model: modelReference,
+      agents: panelSize,
+      ...(configuredPanel?.source ? { panelConfigSource: configuredPanel.source } : {}),
+      ...(thinkingLevel !== undefined
+        ? { thinkingLevel }
+        : configuredThinking !== undefined
+          ? { thinkingLevel: configuredThinking }
+          : {}),
+    };
+
     const settled = await Promise.allSettled(
-      lenses.map((lens) =>
-        runPanelist(createAgent, lens, panelSize, params.prompt, {
-          cwd: options.cwd,
+      panelAgents.map((panelAgent) => {
+        const model = resolveThinkModel(panelAgent.modelReference, options.modelRegistry);
+        if (!model) {
+          throw new Error(`Unable to find Pi model ${panelAgent.modelReference}`);
+        }
+        return runPanelist(createAgent, panelAgent.lens, panelSize, params.prompt, {
+          cwd,
           model,
           modelRegistry: options.modelRegistry,
-          thinkingLevel: sessionThinkingLevel,
+          thinkingLevel: panelAgent.thinkingLevel,
+          systemPrompt: panelAgent.systemPrompt,
           signal: options.signal,
-        }),
-      ),
+        });
+      }),
     );
 
     const panel: ThinkPanelEntry[] = settled.map((outcome, index) => {
-      const lens = lenses[index];
+      const panelAgent = panelAgents[index]!;
       if (outcome.status === "fulfilled") {
         return {
-          lens: lens.key,
-          title: lens.title,
+          lens: panelAgent.lens.key,
+          title: panelAgent.name,
           text: outcome.value.text,
           model: outcome.value.model,
           thinkingLevel: outcome.value.thinkingLevel,
         };
       }
       return {
-        lens: lens.key,
-        title: lens.title,
+        lens: panelAgent.lens.key,
+        title: panelAgent.name,
         error: errorMessage(outcome.reason),
       };
     });
@@ -526,11 +716,13 @@ export async function executeThinkAgent(
     }
 
     const resolvedThinking = succeeded[0]?.thinkingLevel ?? thinkingLevel;
-    // Only surface an effort level when the caller actually requested one, so
-    // the rendered header and details.thinkingLevel never disagree (a panelist's
-    // model-default effort is not a level we asked for, so we don't report it).
-    const reportedThinking =
-      thinkingLevel !== undefined ? resolvedThinking : undefined;
+    // Only surface an effort level when the caller actually requested one, or
+    // when a structured panel config explicitly selected per-agent effort.
+    const reportedThinking = configuredPanel
+      ? configuredThinking
+      : thinkingLevel !== undefined
+        ? resolvedThinking
+        : undefined;
     const combined = formatPanel(panel, panelSize, reportedThinking);
 
     return {
@@ -580,20 +772,29 @@ export default function thinkExtension(pi: ExtensionAPI) {
       "Use think for hard reasoning, architecture tradeoffs, debugging strategy, or when an adversarial second pass would improve the answer.",
       "Pass a complete, self-contained prompt; the think tool only receives the prompt string.",
       "Tune `thinking` for depth (off→xhigh) and `agents` for breadth (1→6 distinct expert lenses); use agents:3 for real decisions, 4-6 for the highest-stakes calls.",
+      "For custom panels, pass `agentConfig` inline or as a JSON file path, or `panel` to load .agents/think/<name>.json. Structured panel config is mutually exclusive with numeric `agents`.",
       "The think tool is implemented inside Pi via the SDK and does not shell out to a local binary.",
     ],
     parameters: ThinkParams,
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const panelSize = clampPanelSize(params.agents);
+      const configuredCount =
+        params.agentConfig &&
+        typeof params.agentConfig === "object" &&
+        Array.isArray((params.agentConfig as { agents?: unknown }).agents)
+          ? (params.agentConfig as { agents: unknown[] }).agents.length
+          : undefined;
+      const panelSize = configuredCount ?? clampPanelSize(params.agents);
       onUpdate?.({
         content: [
           {
             type: "text",
             text:
-              panelSize > 1
-                ? `Thinking via a panel of ${panelSize} Pi SDK critics...`
-                : "Thinking via Pi SDK sub-agent...",
+              params.panel || params.agentConfig
+                ? "Thinking via a configured Pi SDK critic panel..."
+                : panelSize > 1
+                  ? `Thinking via a panel of ${panelSize} Pi SDK critics...`
+                  : "Thinking via Pi SDK sub-agent...",
           },
         ],
         details: { prompt: params.prompt, agents: panelSize },
@@ -607,8 +808,9 @@ export default function thinkExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
+      const configured = args.panel || args.agentConfig;
       const panelSize = clampPanelSize(args.agents);
-      const badge = panelSize > 1 ? `think×${panelSize} ` : "think ";
+      const badge = configured ? "think:panel " : panelSize > 1 ? `think×${panelSize} ` : "think ";
       return new Text(
         `${theme.fg("toolTitle", theme.bold(badge))}${theme.fg(
           "muted",

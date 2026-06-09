@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -5,6 +8,7 @@ import {
   default as thinkExtension,
   executeThinkAgent,
   resolveThinkModel,
+  resolveThinkPanelConfig,
   THINK_TOOL_DEFAULT_MODEL,
   type ThinkAgentRunner,
   type ThinkParams,
@@ -208,6 +212,25 @@ describe("pi-think CLI wrapper", () => {
     });
   });
 
+  test("parses structured agent config CLI flags", () => {
+    expect(
+      parseThinkCliArgs([
+        "--panel",
+        "migration-review",
+        "--agent-config",
+        '{"agents":[]}',
+        "review",
+      ]),
+    ).toEqual({
+      kind: "run",
+      options: {
+        panel: "migration-review",
+        agentConfig: '{"agents":[]}',
+      },
+      promptParts: ["review"],
+    });
+  });
+
   test("rejects invalid CLI options before running the think tool", () => {
     expect(parseThinkCliArgs(["--thinking", "turbo"])).toEqual({
       kind: "error",
@@ -241,6 +264,25 @@ describe("pi-think CLI wrapper", () => {
       { prompt: "inspect the plan", thinking: "low", agents: 2 },
     ]);
     expect(result).toEqual({ exitCode: 0, stdout: "mock critique\n" });
+  });
+
+  test("delegates structured agent config to executeThinkAgent", async () => {
+    const calls: ThinkParams[] = [];
+    const config = '{"agents":[{"name":"Friendly","effort":"low"}]}';
+    const result = await runThinkCli(["--agent-config", config, "inspect"], {
+      cwd: "/tmp/cli-cwd",
+      stdin: { text: async () => "" },
+      execute: async (params) => {
+        calls.push(params);
+        return {
+          content: [{ type: "text", text: "mock configured critique" }],
+          details: { prompt: params.prompt, output: "mock configured critique" },
+        } as Awaited<ReturnType<typeof executeThinkAgent>>;
+      },
+    });
+
+    expect(calls).toEqual([{ prompt: "inspect", agentConfig: config }]);
+    expect(result).toEqual({ exitCode: 0, stdout: "mock configured critique\n" });
   });
 
   test("uses stdin as the prompt when no prompt argument is supplied", async () => {
@@ -447,6 +489,94 @@ describe("executeThinkAgent", () => {
       thinkingLevel: "high",
       agents: 2,
     });
+  });
+
+  test("normalizes inline structured agent config with aliases and prompt overrides", () => {
+    const normalized = resolveThinkPanelConfig(
+      {
+        agentConfig: {
+          agents: [
+            {
+              name: "Friendly Agent Name",
+              appendSystemPrompt: "Be unusually concise.",
+              model: "openai-codex/gpt-5.5",
+              effort: "low",
+            },
+          ],
+        },
+      },
+      "/tmp/project",
+    );
+
+    expect(normalized?.agents).toHaveLength(1);
+    expect(normalized?.agents[0]).toMatchObject({
+      name: "Friendly Agent Name",
+      modelReference: "openai-codex/gpt-5.5",
+      thinkingLevel: "low",
+    });
+    expect(normalized?.agents[0]?.systemPrompt).toContain("Adversarial Critic");
+    expect(normalized?.agents[0]?.systemPrompt).toContain("Be unusually concise.");
+  });
+
+  test("loads named panel configs from .agents/think and schema file pointers", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-think-panel-"));
+    const panelDir = join(cwd, ".agents", "think");
+    mkdirSync(panelDir, { recursive: true });
+    writeFileSync(
+      join(panelDir, "schema.json"),
+      JSON.stringify({ type: "object", properties: { ok: { type: "boolean" } } }),
+    );
+    writeFileSync(
+      join(panelDir, "migration.json"),
+      JSON.stringify({
+        agents: [
+          {
+            name: "Schema critic",
+            appendSystemPrompt: "Check the schema.",
+            outputFormat: "schema.json",
+          },
+          {
+            name: "Custom prompt critic",
+            systemPrompt: "You are a custom critic.",
+            effort: "medium",
+          },
+        ],
+      }),
+    );
+
+    const mock = makePanelMock();
+    const result = await executeThinkAgent(
+      { prompt: "review", panel: "migration" },
+      { cwd, modelRegistry: mockThinkModelRegistry(), createAgent: mock.createAgent },
+    );
+
+    expect(mock.inits).toHaveLength(2);
+    expect(mock.inits[0]?.systemPrompt).toContain("Output format");
+    expect(mock.inits[0]?.systemPrompt).toContain('"ok"');
+    expect(mock.inits[1]?.systemPrompt).toBe("You are a custom critic.");
+    expect(mock.inits[1]?.thinkingLevel).toBe("medium");
+    expect(result.details).toMatchObject({
+      agents: 2,
+      thinkingLevel: "mixed",
+      panelConfigSource: join(panelDir, "migration.json"),
+    });
+    expect(outputText(result)).toContain("1 · Schema critic");
+    expect(outputText(result)).toContain("2 · Custom prompt critic");
+  });
+
+  test("rejects conflicting structured config fields before starting agents", async () => {
+    const mock = makePanelMock();
+    const result = await executeThinkAgent(
+      {
+        prompt: "x",
+        agents: 2,
+        agentConfig: { agents: [{ systemPrompt: "x" }] },
+      },
+      { modelRegistry: mockThinkModelRegistry(), createAgent: mock.createAgent },
+    );
+
+    expect(mock.inits).toHaveLength(0);
+    expect(result.details.error).toBe("agents cannot be combined with agentConfig or panel");
   });
 
   test("does not surface an effort level the caller never requested", async () => {

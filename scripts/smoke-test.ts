@@ -39,7 +39,7 @@ if (!registeredTool) {
 }
 
 const paramKeys = Object.keys(registeredTool.parameters.properties).sort();
-if (paramKeys.join(",") !== "agents,model,prompt,thinking") {
+if (paramKeys.join(",") !== "agentConfig,agents,model,panel,prompt,thinking") {
   console.error("FAIL: unexpected param keys", paramKeys);
   process.exit(1);
 }
@@ -191,6 +191,60 @@ if (
 }
 
 console.log("smoke: panel orchestration OK (3 distinct lenses, aggregated)");
+
+const structuredPrompts: string[] = [];
+const structuredResult = await executeThinkAgent(
+  {
+    prompt: "structured?",
+    agentConfig: {
+      agents: [
+        { name: "Friendly", appendSystemPrompt: "Be friendly.", effort: "low" },
+        { name: "Strict", systemPrompt: "You are strict.", effort: "medium" },
+      ],
+    },
+  },
+  {
+    cwd: process.cwd(),
+    modelRegistry,
+    createAgent: async (opts) => {
+      structuredPrompts.push(opts.systemPrompt ?? "");
+      const seat = structuredPrompts.length;
+      return {
+        async run() {
+          return {
+            text: `structured-${seat}`,
+            model: THINK_TOOL_DEFAULT_MODEL,
+            thinkingLevel: opts.thinkingLevel ?? "off",
+          };
+        },
+        dispose() {},
+      };
+    },
+  },
+);
+const structuredDetails = (
+  structuredResult as unknown as { details: Record<string, unknown> }
+).details;
+const structuredText =
+  (structuredResult as unknown as { content: { text: string }[] }).content[0]
+    ?.text ?? "";
+if (
+  structuredDetails.agents !== 2 ||
+  structuredDetails.thinkingLevel !== "mixed" ||
+  !structuredText.includes("1 · Friendly") ||
+  !structuredText.includes("2 · Strict") ||
+  !structuredPrompts[0]?.includes("Be friendly.") ||
+  structuredPrompts[1] !== "You are strict."
+) {
+  console.error("FAIL: structured panel config", {
+    structuredDetails,
+    structuredText,
+    structuredPrompts,
+  });
+  process.exit(1);
+}
+
+console.log("smoke: structured agent config OK (aliases, prompts, effort)");
 
 if (process.env.PI_THINK_LIVE === "1") {
   const liveRegistry =

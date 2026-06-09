@@ -1,0 +1,297 @@
+name: pi-think-docs-agent
+description: Update and organize pi-think markdown documentation from a caller-provided change list and prompt.
+type: graph
+working_dir: /Users/mish/.pi/agent/extensions/pi-think
+timeout_sec: 900
+
+params:
+  type: object
+  properties:
+    changes:
+      type: string
+      default: |
+        Implemented structured think agent panel configuration for both the CLI and Pi extension tool.
+        Added `panel` and `agentConfig` inputs, per-agent name/systemPrompt/appendSystemPrompt/model/effort/outputFormat handling,
+        conflict validation against numeric agents, named section output, CLI flags --panel and --agent-config,
+        smoke-panel example at .agents/think/smoke-panel.json, tests, smoke tests, compiled CLI verification, and direct pi CLI extension verification.
+    prompt:
+      type: string
+      default: |
+        Create or update markdown docs for this extension so any developer can understand the new structured panel feature,
+        how to call it from the standalone CLI and Pi extension tool, validation rules, preferred .agents/think/<panel_name>.json files,
+        and how the change was verified.
+  required: [changes, prompt]
+
+harness:
+  provider: pi
+  model: xai-auth/grok-composer-2.5-fast
+  no_session: true
+  approve: true
+  tools: read,write,edit,grep,find,ls,bash
+
+steps:
+  - id: ensure_docs_dir
+    action: file.mkdir
+    with:
+      path: docs
+
+  - id: render_doc_brief
+    depends: [ensure_docs_dir]
+    action: template.render
+    with:
+      output: docs/doc-update-brief.md
+      data:
+        changes: ${changes}
+        prompt: ${prompt}
+      template: |
+        # Documentation Update Brief
+
+        ## Change List
+
+        {{ .changes }}
+
+        ## Documentation Prompt
+
+        {{ .prompt }}
+
+        ## Policy
+
+        The workflow must choose exactly one outcome before editing:
+
+        - `SKIP`: no documentation changes. Use this when no app-facing CLI/Pi tool functionality changed and there is no explicit cosmetic documentation request, or when app functionality changed but existing docs already cover it.
+        - `COSMETIC`: documentation-only formatting, copy, or structure changes requested by the caller. This may edit docs even when functionality did not change, but must not alter documented behavior.
+        - `APP_AUDIT`: app-facing CLI/Pi tool functionality appears to have changed. Audit current docs first; edit only if the changed behavior is missing, stale, or unclear.
+
+        App-facing scope includes `cli.ts`, `index.ts`, `lib/agent.ts`, `constants.ts`, `package.json` user-facing command metadata, and `.agents/think/*.json` examples.
+        Non-app scope includes dev/agent tooling (`.claude/`, `.codex/`, `.cursor/`, `workflows/`), tests, smoke scripts, and docs, unless the caller explicitly asks for doc cosmetic changes or the change affects documented CLI/tool behavior.
+
+        ## Expectations
+
+        - Keep documentation in `docs/` as readable Markdown.
+        - Preserve useful existing docs and organize them with an index page.
+        - Cover both the standalone CLI and Pi extension tool surfaces equally when app-facing behavior changes.
+        - Include examples for inline JSON and `.agents/think/<panel_name>.json` files when relevant.
+        - Include validation/conflict behavior and verification notes when relevant.
+        - Prefer no file edits over churn when docs are already complete.
+
+  - id: classify_scope
+    depends: [render_doc_brief]
+    run: |
+      #!/usr/bin/env python3
+      import json, pathlib, subprocess
+
+      brief = pathlib.Path('docs/doc-update-brief.md').read_text()
+      lower = brief.lower()
+      cosmetic_words = [
+          'cosmetic', 'format', 'formatting', 'copy', 'wording', 'tone',
+          'structure', 'organize', 'reorganize', 'readability', 'style'
+      ]
+      app_paths = ('cli.ts', 'index.ts', 'lib/agent.ts', 'constants.ts', 'package.json')
+      non_app_prefixes = ('.claude/', '.codex/', '.cursor/', 'workflows/', 'docs/')
+      non_app_exact = ('index.test.ts', 'cli-runtime.test.ts', 'scripts/smoke-test.ts')
+
+      def lines(cmd):
+          try:
+              out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+              return [line for line in out.splitlines() if line]
+          except Exception:
+              return []
+
+      changed = sorted(set(lines(['git', 'diff', '--name-only', 'HEAD', '--']) + lines(['git', 'ls-files', '--others', '--exclude-standard'])))
+      cosmetic_requested = any(word in lower for word in cosmetic_words)
+      app_changed = any(path in app_paths or path.startswith('lib/') or path.startswith('.agents/think/') for path in changed)
+      only_non_app = bool(changed) and not app_changed and all(
+          path.startswith(non_app_prefixes) or path in non_app_exact or path.startswith('scripts/')
+          for path in changed
+      )
+
+      if cosmetic_requested:
+          decision = 'COSMETIC'
+          reason = 'Caller prompt/change brief requests documentation formatting, copy, or structure work.'
+      elif app_changed:
+          decision = 'APP_AUDIT'
+          reason = 'Changed paths include app-facing CLI/Pi tool files or documented panel examples.'
+      elif only_non_app:
+          decision = 'SKIP'
+          reason = 'Changed paths are docs, tests, workflow, or dev/agent tooling only with no cosmetic doc request.'
+      else:
+          decision = 'SKIP'
+          reason = 'No app-facing functionality change detected and no cosmetic documentation request detected.'
+
+      print(json.dumps({
+          'decision': decision,
+          'reason': reason,
+          'changed_paths': changed,
+          'cosmetic_requested': cosmetic_requested,
+          'app_changed': app_changed,
+          'only_non_app': only_non_app,
+      }, indent=2))
+    output:
+      decision:
+        from: stdout
+        decode: json
+        select: .decision
+      reason:
+        from: stdout
+        decode: json
+        select: .reason
+      changed_paths:
+        from: stdout
+        decode: json
+        select: .changed_paths
+    stdout:
+      artifact: docs-agent/classification.json
+
+  - id: route_scope
+    depends: [classify_scope]
+    action: router.route
+    with:
+      value: ${classify_scope.output.decision}
+      routes:
+        SKIP: [record_skip]
+        COSMETIC: [update_docs_cosmetic]
+        APP_AUDIT: [audit_app_docs]
+        "re:.*": [record_unknown_skip]
+
+  - id: record_skip
+    action: file.write
+    with:
+      path: docs/doc-update-result.md
+      overwrite: true
+      content: |
+        # Documentation Update Result
+
+        Outcome: SKIP
+
+        Reason: ${classify_scope.output.reason}
+
+        No documentation files were intentionally changed by the documentation agent.
+
+  - id: record_unknown_skip
+    action: file.write
+    with:
+      path: docs/doc-update-result.md
+      overwrite: true
+      content: |
+        # Documentation Update Result
+
+        Outcome: SKIP
+
+        Reason: unrecognized classifier decision `${classify_scope.output.decision}`. The workflow skipped rather than risk documentation churn.
+
+  - id: audit_app_docs
+    action: harness.run
+    with:
+      tools: read,grep,find,ls,bash
+      prompt: |
+        You are a read-only documentation coverage auditor for the pi-think extension.
+
+        Read `docs/doc-update-brief.md`, inspect the app-facing CLI/Pi tool files and current docs, then decide whether documentation edits are required.
+
+        Changed paths from the deterministic classifier:
+        ${classify_scope.output.changed_paths}
+
+        Return JSON only, with no Markdown fences:
+        {
+          "decision": "UPDATE" | "SKIP",
+          "reason": "short reason",
+          "evidence": ["file or command evidence checked"],
+          "missing_or_stale_docs": ["specific gaps, empty if SKIP"]
+        }
+
+        Choose SKIP if the changed CLI/Pi tool functionality is already properly documented.
+        Choose UPDATE only when docs are missing, stale, misleading, or incomplete for the app-facing behavior.
+    output:
+      decision:
+        from: stdout
+        decode: json
+        select: .decision
+      reason:
+        from: stdout
+        decode: json
+        select: .reason
+    stdout:
+      artifact: docs-agent/audit.json
+    stderr:
+      artifact: docs-agent/audit-stderr.log
+
+  - id: route_audit
+    depends: [audit_app_docs]
+    action: router.route
+    with:
+      value: ${audit_app_docs.output.decision}
+      routes:
+        UPDATE: [update_docs_functional]
+        SKIP: [record_audit_skip]
+        "re:.*": [record_audit_unknown_skip]
+
+  - id: record_audit_skip
+    action: file.write
+    with:
+      path: docs/doc-update-result.md
+      overwrite: true
+      content: |
+        # Documentation Update Result
+
+        Outcome: SKIP
+
+        Scope classifier reason: ${classify_scope.output.reason}
+
+        Audit reason: ${audit_app_docs.output.reason}
+
+        The app-facing change was audited and current documentation was judged complete, so no documentation update was performed.
+
+  - id: record_audit_unknown_skip
+    action: file.write
+    with:
+      path: docs/doc-update-result.md
+      overwrite: true
+      content: |
+        # Documentation Update Result
+
+        Outcome: SKIP
+
+        Scope classifier reason: ${classify_scope.output.reason}
+
+        Reason: unrecognized audit decision `${audit_app_docs.output.decision}`. The workflow skipped rather than risk documentation churn.
+
+  - id: update_docs_cosmetic
+    action: harness.run
+    with:
+      prompt: |
+        You are a specialized documentation editor for the pi-think extension.
+
+        Mode: COSMETIC documentation update.
+
+        Read `docs/doc-update-brief.md`, then update Markdown files under `docs/` only for the requested formatting, copy, or structure improvements.
+
+        Hard rules:
+        - Do not change documented CLI/Pi tool behavior unless it is already wrong or unclear.
+        - Do not edit source code.
+        - Prefer focused, minimal diffs over broad rewrites.
+        - Finish by printing a concise summary of changed docs.
+    stdout:
+      artifact: docs-agent/cosmetic-stdout.md
+    stderr:
+      artifact: docs-agent/cosmetic-stderr.log
+
+  - id: update_docs_functional
+    action: harness.run
+    with:
+      prompt: |
+        You are a specialized documentation editor for the pi-think extension.
+
+        Mode: APP-FACING documentation sync.
+
+        Read `docs/doc-update-brief.md` and `docs-agent/audit.json` from the Dagu artifacts if available. Inspect the changed CLI/Pi tool behavior and current docs, then update Markdown files under `docs/` only where documentation is missing, stale, misleading, or incomplete.
+
+        Hard rules:
+        - Every edit must be tied to CLI/Pi tool behavior or examples that users can call.
+        - Do not change docs for dev/agent tooling unless it affects documented CLI/Pi tool behavior.
+        - Do not edit source code.
+        - If you discover docs are already complete despite this step running, make no docs edits and print NO_CHANGES with evidence.
+        - Finish by printing a concise summary of changed docs or NO_CHANGES.
+    stdout:
+      artifact: docs-agent/functional-stdout.md
+    stderr:
+      artifact: docs-agent/functional-stderr.log
