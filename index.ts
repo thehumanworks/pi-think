@@ -9,6 +9,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { THINKING_LEVELS, THINK_TOOL_DEFAULT_MODEL, type ThinkAgentThinkingLevel } from "./constants";
+import { getThinkDefaultModelReference } from "./model-defaults";
 import {
   assignThinkLenses,
   buildThinkSystemPrompt,
@@ -21,6 +22,7 @@ import {
   type ThinkLens,
 } from "./lib/agent";
 export { THINK_TOOL_DEFAULT_MODEL } from "./constants";
+export { getThinkDefaultModelReference } from "./model-defaults";
 
 const ThinkThinkingLevelSchema = Type.Union(
   [
@@ -211,7 +213,7 @@ const ThinkParams = Type.Object({
   }),
   model: Type.Optional(
     Type.String({
-      description: `Model for the think sub-agent(s) (provider/id). Default: ${THINK_TOOL_DEFAULT_MODEL}`,
+      description: `Model for the think sub-agent(s) (provider/id). Default: the Pi defaultProvider/defaultModel in settings.json; fallback: ${THINK_TOOL_DEFAULT_MODEL}`,
     }),
   ),
   thinking: Type.Optional(ThinkThinkingLevelSchema),
@@ -402,7 +404,7 @@ export function resolveThinkPanelConfig(
     }
     const modelReference = typeof raw.model === "string" && raw.model.trim()
       ? raw.model.trim()
-      : params.model ?? THINK_TOOL_DEFAULT_MODEL;
+      : params.model ?? getThinkDefaultModelReference();
     const thinkingLevel = (effort ?? params.thinking ?? "off") as ThinkAgentThinkingLevel;
     let prompt = systemPrompt ?? buildThinkSystemPrompt(lenses[index], rawAgents.length);
     if (appendSystemPrompt) prompt = `${prompt}
@@ -500,7 +502,8 @@ export function resolveThinkModel(
   modelReference: string,
   modelRegistry?: ModelRegistry,
 ): Model<any> | undefined {
-  const reference = modelReference.trim() || THINK_TOOL_DEFAULT_MODEL;
+  const defaultReference = getThinkDefaultModelReference();
+  const reference = modelReference.trim() || defaultReference;
   const slashIndex = reference.indexOf("/");
 
   if (slashIndex !== -1) {
@@ -626,7 +629,7 @@ export async function executeThinkAgent(
   options: ExecuteThinkAgentOptions = {},
 ): Promise<AgentToolResult<ThinkDetails>> {
   const cwd = options.cwd ?? process.cwd();
-  let modelReference = params.model ?? THINK_TOOL_DEFAULT_MODEL;
+  let modelReference = params.model ?? getThinkDefaultModelReference();
   let thinkingLevel = params.thinking;
   let panelSize = clampPanelSize(params.agents);
   let details: ThinkDetails = {

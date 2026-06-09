@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   clampPanelSize,
@@ -12,6 +12,7 @@ import {
   THINK_TOOL_DEFAULT_MODEL,
   type ThinkAgentRunner,
   type ThinkParams,
+  getThinkDefaultModelReference,
 } from "./index";
 import { parseThinkCliArgs, runThinkCli } from "./cli";
 import {
@@ -27,6 +28,21 @@ import {
   type ThinkAgentInitOptions,
   type ThinkAgentThinkingLevel,
 } from "./lib/agent";
+
+const previousPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+const testAgentDir = mkdtempSync(join(tmpdir(), "pi-think-agent-"));
+
+beforeAll(() => {
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+});
+
+afterAll(() => {
+  if (previousPiCodingAgentDir === undefined) {
+    delete process.env.PI_CODING_AGENT_DIR;
+  } else {
+    process.env.PI_CODING_AGENT_DIR = previousPiCodingAgentDir;
+  }
+});
 
 function makeMockModel(provider: string, id: string) {
   return {
@@ -296,6 +312,29 @@ describe("pi-think CLI wrapper", () => {
 
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout ?? "{}").details.prompt).toBe("review stdin");
+  });
+});
+
+describe("getThinkDefaultModelReference", () => {
+  test("uses defaultProvider/defaultModel from PI_CODING_AGENT_DIR settings", () => {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const agentDir = mkdtempSync(join(tmpdir(), "pi-think-settings-"));
+    writeFileSync(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ defaultProvider: "openai-codex", defaultModel: "gpt-5.5" }),
+    );
+
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      expect(getThinkDefaultModelReference()).toBe("openai-codex/gpt-5.5");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.PI_CODING_AGENT_DIR;
+      } else {
+        process.env.PI_CODING_AGENT_DIR = previous;
+      }
+      rmSync(agentDir, { recursive: true, force: true });
+    }
   });
 });
 

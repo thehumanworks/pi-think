@@ -4,6 +4,7 @@
  */
 import thinkExtension, {
   executeThinkAgent,
+  getThinkDefaultModelReference,
   resolveThinkModel,
   THINK_TOOL_DEFAULT_MODEL,
 } from "../index.ts";
@@ -45,22 +46,29 @@ if (paramKeys.join(",") !== "agentConfig,agents,model,panel,prompt,thinking") {
 }
 
 function stubThinkModelRegistry(): ModelRegistry {
-  const stub = {
-    provider: THINK_AGENT_PROVIDER,
-    id: THINK_AGENT_MODEL,
-    name: "Grok Composer 2.5 Fast",
-    api: "openai-completions",
-  };
+  const defaultReference = getThinkDefaultModelReference();
+  const [defaultProvider, defaultModel] = defaultReference.split("/", 2);
+  const stubs = [
+    {
+      provider: THINK_AGENT_PROVIDER,
+      id: THINK_AGENT_MODEL,
+      name: "Grok Composer 2.5 Fast",
+      api: "openai-completions",
+    },
+    {
+      provider: defaultProvider || THINK_AGENT_PROVIDER,
+      id: defaultModel || THINK_AGENT_MODEL,
+      name: defaultModel || THINK_AGENT_MODEL,
+      api: "openai-completions",
+    },
+  ];
 
   return {
     find(provider: string, modelId: string) {
-      if (provider === THINK_AGENT_PROVIDER && modelId === THINK_AGENT_MODEL) {
-        return stub;
-      }
-      return undefined;
+      return stubs.find((stub) => stub.provider === provider && stub.id === modelId);
     },
     getAll() {
-      return [stub];
+      return stubs;
     },
   } as unknown as ModelRegistry;
 }
@@ -73,11 +81,13 @@ const modelRegistry =
     ? registryFromDisk
     : stubThinkModelRegistry();
 
-const resolved = resolveThinkModel(THINK_TOOL_DEFAULT_MODEL, modelRegistry);
+const defaultReference = getThinkDefaultModelReference();
+const [defaultProvider, defaultModel] = defaultReference.split("/", 2);
+const resolved = resolveThinkModel(defaultReference, modelRegistry);
 if (
   !resolved ||
-  resolved.provider !== THINK_AGENT_PROVIDER ||
-  resolved.id !== THINK_AGENT_MODEL
+  resolved.provider !== defaultProvider ||
+  resolved.id !== defaultModel
 ) {
   console.error("FAIL: resolveThinkModel default", resolved);
   process.exit(1);
@@ -102,7 +112,7 @@ const mocked = await executeThinkAgent(
         async run() {
           return {
             text: '{"bottom_line":"smoke ok"}',
-            model: THINK_TOOL_DEFAULT_MODEL,
+            model: defaultReference,
             thinkingLevel: "off",
           };
         },
@@ -119,8 +129,8 @@ const snap = initSnapshots[0] as {
 };
 if (
   snap?.thinkingLevel !== "off" ||
-  snap?.provider !== THINK_AGENT_PROVIDER ||
-  snap?.modelId !== THINK_AGENT_MODEL
+  snap?.provider !== defaultProvider ||
+  snap?.modelId !== defaultModel
 ) {
   console.error("FAIL: init options (expected thinkingLevel off)", snap);
   process.exit(1);
@@ -129,7 +139,7 @@ if (
 const details = (mocked as unknown as { details: Record<string, unknown> })
   .details;
 if (
-  details.model !== THINK_TOOL_DEFAULT_MODEL ||
+  details.model !== defaultReference ||
   details.thinkingLevel !== undefined ||
   details.agents !== 1 ||
   !Array.isArray(details.panel) ||
@@ -156,7 +166,7 @@ const panelResult = await executeThinkAgent(
         async run() {
           return {
             text: `{"lens":"seat ${seat}","bottom_line":"ok"}`,
-            model: THINK_TOOL_DEFAULT_MODEL,
+            model: defaultReference,
             thinkingLevel: "off",
           };
         },
@@ -213,7 +223,7 @@ const structuredResult = await executeThinkAgent(
         async run() {
           return {
             text: `structured-${seat}`,
-            model: THINK_TOOL_DEFAULT_MODEL,
+            model: defaultReference,
             thinkingLevel: opts.thinkingLevel ?? "off",
           };
         },

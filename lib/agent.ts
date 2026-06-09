@@ -13,6 +13,7 @@ import {
   THINK_AGENT_PROVIDER,
   type ThinkAgentThinkingLevel,
 } from "../constants";
+import { getThinkDefaultModelReference } from "../model-defaults";
 
 export {
   THINK_AGENT_MODEL,
@@ -220,16 +221,20 @@ export class ThinkAgent {
   static async init(options: ThinkAgentInitOptions = {}): Promise<ThinkAgent> {
     const cwd = options.cwd ?? process.cwd();
     const agentDir = options.agentDir ?? getAgentDir();
+    const defaultModelReference = getThinkDefaultModelReference();
+    const [defaultProvider, defaultModelId] = defaultModelReference.includes("/")
+      ? defaultModelReference.split("/", 2)
+      : [THINK_AGENT_PROVIDER, defaultModelReference];
     const model =
       options.model ??
       (getModel as (p: string, id: string) => Model<any> | undefined)(
-        THINK_AGENT_PROVIDER,
-        THINK_AGENT_MODEL,
+        defaultProvider || THINK_AGENT_PROVIDER,
+        defaultModelId || THINK_AGENT_MODEL,
       );
 
     if (!model) {
       throw new Error(
-        `Unable to find Pi model ${THINK_AGENT_PROVIDER}/${THINK_AGENT_MODEL}`,
+        `Unable to find Pi model ${defaultProvider || THINK_AGENT_PROVIDER}/${defaultModelId || THINK_AGENT_MODEL}`,
       );
     }
 

@@ -1,4 +1,26 @@
+# Dependencies
 node_modules/
-.DS_Store
-.env*
+
+# Build outputs
+dist/
 think
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs and runtime output
+*.log
+logs/
+.DS_Store
+
+# Test / coverage / temp artifacts
+coverage/
+.tmp/
+tmp/
+*.tmp
+
+# Editor / OS metadata
+.vscode/
+.idea/

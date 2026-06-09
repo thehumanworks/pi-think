@@ -15,7 +15,7 @@ Important options:
 
 ```text
 -p, --prompt <text>       Prompt to send to the critic(s)
--m, --model <provider/id> Model for the sub-agent(s)
+-m, --model <provider/id> Model for the sub-agent(s); defaults to Pi settings `defaultProvider`/`defaultModel`
 -t, --thinking <level>    off|minimal|low|medium|high|xhigh
 -a, --agents <count>      Numeric panel size for built-in lenses
     --panel <name|path>    Load .agents/think/<name>.json or an explicit JSON file
@@ -23,6 +23,10 @@ Important options:
                            Inline JSON config or path to { agents: [...] }
     --json                Print the full tool result as JSON
 ```
+
+## Default model
+
+If `--model` is omitted, the CLI reads the user's Pi settings from `$PI_CODING_AGENT_DIR/settings.json`, or `~/.pi/agent/settings.json` when `PI_CODING_AGENT_DIR` is unset. It uses `defaultProvider` + `defaultModel` as `provider/model`. If those settings are absent, it falls back to `xai-auth/grok-composer-2.5-fast`.
 
 ## Saved panel from `.agents/think`
 

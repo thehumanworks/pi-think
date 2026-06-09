@@ -63,7 +63,7 @@ Usage:
 
 Options:
   -p, --prompt <text>       Prompt to send to the critic(s)
-  -m, --model <provider/id> Model for the sub-agent(s) (default: ${THINK_TOOL_DEFAULT_MODEL})
+  -m, --model <provider/id> Model for the sub-agent(s) (default: Pi settings defaultProvider/defaultModel; fallback: ${THINK_TOOL_DEFAULT_MODEL})
   -t, --thinking <level>    off|minimal|low|medium|high|xhigh
   -a, --agents <count>      Panel size, clamped by the underlying think tool
       --panel <name|path>    Load .agents/think/<name>.json or an explicit JSON file
@@ -176,10 +176,13 @@ export function configuredFallbackPackageRoots(
   return [...new Set(roots)];
 }
 
-function providerFromModelReference(modelReference?: string): string | undefined {
-  const reference = (modelReference ?? THINK_TOOL_DEFAULT_MODEL).trim();
+function providerFromModelReference(
+  modelReference: string | undefined,
+  defaultModelReference: string,
+): string | undefined {
+  const reference = (modelReference ?? defaultModelReference).trim();
   const slashIndex = reference.indexOf("/");
-  if (slashIndex === -1) return THINK_TOOL_DEFAULT_MODEL.split("/")[0];
+  if (slashIndex === -1) return defaultModelReference.split("/")[0];
   const provider = reference.slice(0, slashIndex).trim();
   return provider || undefined;
 }
@@ -257,12 +260,12 @@ async function defaultThinkCliRuntime(
   params: ThinkCliParams,
 ): Promise<ThinkCliRuntime> {
   configurePiSdkPackageDir(cwd);
-  const [{ executeThinkAgent }, piSdk] = await Promise.all([
+  const [{ executeThinkAgent, getThinkDefaultModelReference }, piSdk] = await Promise.all([
     import("./index"),
     import("@earendil-works/pi-coding-agent"),
   ]);
   let services = (await piSdk.createAgentSessionServices({ cwd })) as PiRuntimeServices;
-  const provider = providerFromModelReference(params.model);
+  const provider = providerFromModelReference(params.model, getThinkDefaultModelReference());
 
   if (
     params.panel !== undefined ||

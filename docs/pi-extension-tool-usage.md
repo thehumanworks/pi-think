@@ -24,6 +24,10 @@ Use either:
 
 Do not combine them.
 
+## Default model
+
+If `model` is omitted, the tool reads the user's Pi settings from `$PI_CODING_AGENT_DIR/settings.json`, or `~/.pi/agent/settings.json` when `PI_CODING_AGENT_DIR` is unset. It uses `defaultProvider` + `defaultModel` as `provider/model`. If those settings are absent, it falls back to `xai-auth/grok-composer-2.5-fast`.
+
 ## Load a saved panel
 
 A named panel loads `.agents/think/<panel_name>.json` from the current working directory:
