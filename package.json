@@ -1,0 +1,30 @@
+{
+  "name": "pi-extension-think",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi Coding Agent extension that exposes a contained Pi SDK reasoning sub-agent as a think tool.",
+  "bin": {
+    "pi-think": "./cli.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "build:cli": "bun build ./cli.ts --compile --outfile think"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.74.1",
+    "@earendil-works/pi-coding-agent": "^0.74.1",
+    "@earendil-works/pi-tui": "^0.74.1"
+  },
+  "peerDependencies": {
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "trustedDependencies": [
+    "koffi",
+    "protobufjs"
+  ]
+}
