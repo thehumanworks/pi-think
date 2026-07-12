@@ -24,9 +24,9 @@ Use either:
 
 Do not combine them.
 
-## Default model
+## Smart model routing
 
-If `model` is omitted, the tool reads the user's Pi settings from `$PI_CODING_AGENT_DIR/settings.json`, or `~/.pi/agent/settings.json` when `PI_CODING_AGENT_DIR` is unset. It uses `defaultProvider` + `defaultModel` as `provider/model`. If those settings are absent, it falls back to `xai-auth/grok-composer-2.5-fast`.
+If `model` is omitted, the tool routes the first critic away from the calling model's provider. Numeric and configured panels round-robin across `openai-codex`, `claude-bridge`, and `xai-auth`; the caller's provider is placed last. Use `model` only as an explicit override when a task requires a specific provider/model.
 
 ## Load a saved panel
 

@@ -7,9 +7,11 @@ import {
   clampPanelSize,
   default as thinkExtension,
   executeThinkAgent,
+  formatThinkPanelStatus,
   resolveThinkModel,
   resolveThinkPanelConfig,
   THINK_TOOL_DEFAULT_MODEL,
+  getThinkModelReferences,
   type ThinkAgentRunner,
   type ThinkParams,
   getThinkDefaultModelReference,
@@ -65,7 +67,10 @@ const defaultThinkModel = {
 } as const;
 
 function mockThinkModelRegistry(
-  models = [makeMockModel(defaultThinkModel.provider, defaultThinkModel.id)],
+  models = getThinkModelReferences(undefined, 3).map((reference) => {
+    const [provider, id] = reference.split("/", 2);
+    return makeMockModel(provider!, id!);
+  }),
 ) {
   return {
     find(provider: string, modelId: string) {
@@ -268,6 +273,7 @@ describe("pi-think CLI wrapper", () => {
         execute: async (params, options) => {
           calls.push(params);
           expect(options.cwd).toBe("/tmp/cli-cwd");
+          expect(options.callerProvider).toBeUndefined();
           return {
             content: [{ type: "text", text: "mock critique" }],
             details: { prompt: params.prompt, agents: params.agents, output: "mock critique" },
@@ -338,8 +344,125 @@ describe("getThinkDefaultModelReference", () => {
   });
 });
 
+describe("smart provider routing", () => {
+  test("routes a single critic away from the calling provider", async () => {
+    const mock = makePanelMock();
+    await executeThinkAgent(
+      { prompt: "challenge this" },
+      {
+        callerProvider: "openai-codex",
+        modelRegistry: mockThinkModelRegistry(),
+        createAgent: mock.createAgent,
+      },
+    );
+
+    expect(mock.inits[0]?.model).toMatchObject({
+      provider: "claude-bridge",
+      id: "claude-opus-4-8",
+    });
+  });
+
+  test("round-robins panels across all providers, starting away from caller", async () => {
+    const mock = makePanelMock();
+    await executeThinkAgent(
+      { prompt: "challenge this", agents: 4 },
+      {
+        callerProvider: "anthropic",
+        modelRegistry: mockThinkModelRegistry(),
+        createAgent: mock.createAgent,
+      },
+    );
+
+    expect(mock.inits.map((init) => init.model?.provider)).toEqual([
+      "openai-codex",
+      "xai-auth",
+      "claude-bridge",
+      "openai-codex",
+    ]);
+  });
+
+  test("standalone routing skips providers unavailable to the CLI registry", async () => {
+    const mock = makePanelMock();
+    const registry = mockThinkModelRegistry([
+      makeMockModel("claude-bridge", "claude-opus-4-8"),
+      makeMockModel("openai-codex", "gpt-5.6-sol"),
+    ]);
+
+    await executeThinkAgent(
+      { prompt: "challenge this", agents: 3 },
+      { modelRegistry: registry, createAgent: mock.createAgent },
+    );
+
+    expect(mock.inits.map((init) => init.model?.provider)).toEqual([
+      "claude-bridge",
+      "openai-codex",
+      "claude-bridge",
+    ]);
+  });
+
+  test("honors an explicit model override for every panelist", async () => {
+    const mock = makePanelMock();
+    await executeThinkAgent(
+      {
+        prompt: "challenge this",
+        agents: 3,
+        model: "xai-auth/specific-grok",
+      },
+      {
+        callerProvider: "openai-codex",
+        modelRegistry: mockThinkModelRegistry(),
+        createAgent: mock.createAgent,
+      },
+    );
+
+    expect(mock.inits.map((init) => `${init.model?.provider}/${init.model?.id}`))
+      .toEqual([
+        "xai-auth/specific-grok",
+        "xai-auth/specific-grok",
+        "xai-auth/specific-grok",
+      ]);
+  });
+});
+
+describe("formatThinkPanelStatus", () => {
+  test("includes the provider/model for a single agent", () => {
+    expect(formatThinkPanelStatus([
+      {
+        lens: "generalist",
+        title: "Adversarial Critic",
+        model: "claude-bridge/claude-opus-4-8",
+        text: "ok",
+      },
+    ])).toBe(
+      "Complete\nAdversarial Critic: claude-bridge/claude-opus-4-8",
+    );
+  });
+
+  test("lists each panel seat with its provider/model", () => {
+    expect(formatThinkPanelStatus([
+      {
+        lens: "correctness",
+        title: "Correctness",
+        model: "openai-codex/gpt-5.6-sol",
+        text: "ok",
+      },
+      {
+        lens: "risk",
+        title: "Failure Modes",
+        model: "xai-auth/grok-4.5",
+        error: "unavailable",
+      },
+    ])).toBe(
+      "Panel of 2: 1 complete (1 failed)\n" +
+      "1. Correctness: openai-codex/gpt-5.6-sol\n" +
+      "2. Failure Modes: xai-auth/grok-4.5",
+    );
+  });
+});
+
 describe("executeThinkAgent", () => {
   test("resolves canonical provider/model references without changing provider", () => {
+
     const registry = mockThinkModelRegistry([
       makeMockModel("openai-codex", "gpt-5.5"),
       makeMockModel("xai-auth", "grok-composer-2.5-fast"),
@@ -472,12 +595,16 @@ describe("executeThinkAgent", () => {
     expect(result.content).toEqual([
       { type: "text", text: "think failed: panelist 0 failed" },
     ]);
-    expect(result.details).toEqual({
+    expect(result.details).toMatchObject({
       prompt: "where is the bug?",
       model: THINK_TOOL_DEFAULT_MODEL,
       agents: 2,
       error: "panelist 0 failed",
     });
+    expect(result.details.panel?.map((entry) => entry.model)).toEqual([
+      "claude-bridge/claude-opus-4-8",
+      "xai-auth/grok-4.5",
+    ]);
   });
 
   test("runs panelists concurrently, not serially", async () => {

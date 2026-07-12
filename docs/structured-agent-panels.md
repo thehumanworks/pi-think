@@ -28,7 +28,7 @@ Use structured panels when you want stable panelist names, custom per-agent prom
 | `name` | No | Human-readable panel section label and result title. Defaults to the built-in lens title. Blank names are ignored. |
 | `systemPrompt` | No | Fully replaces the default think critic system prompt for this agent. |
 | `appendSystemPrompt` | No | Appends extra instructions to the default lens-specific think critic system prompt. |
-| `model` | No | Per-agent model reference (`provider/id`). Defaults to top-level `model`, then the user's Pi default model from `settings.json` (`defaultProvider` + `defaultModel`), with `xai-auth/grok-composer-2.5-fast` as a fallback if settings are missing. |
+| `model` | No | Explicit per-agent model reference (`provider/id`). Defaults to the top-level `model` override when present; otherwise the panel seat uses the smart cross-provider round-robin. |
 | `effort` | No | Per-agent reasoning effort: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Defaults to top-level `thinking`, then `off`. |
 | `outputFormat` | No | Inline JSON value, inline JSON string, or path to a JSON file that is appended to the agent prompt as an output-format instruction. |
 
