@@ -150,15 +150,21 @@ single critic is usually the right call — adding lenses does not manufacture
 insight the model doesn't have, and a panel is only as strong as its best member.
 
 - \`agents: 1\` — routine checks and a quick second opinion.
-- \`agents: 3\` — the recommended setting for real decisions and high-blast-radius
-  execution. The jump from one critic to three distinct lenses is where almost
-  all of the gain is.
-- \`agents: 4-6\` — reserve for the highest-stakes, multi-faceted calls
-  (architecture, migrations, security-sensitive changes). Returns diminish
-  sharply past three or four lenses; going higher mostly buys cost.
+- \`agents: 3\` — use when **two or more** of these apply: the choice is expensive
+  to reverse; affects multiple modules, teams, users, or public interfaces; has
+  plausible alternatives with materially different tradeoffs; depends on
+  unverified assumptions; or can fail across multiple dimensions such as
+  correctness, security, performance, operability, and compatibility. Also use
+  three for **any one** high-risk action involving security boundaries,
+  destructive operations, production data, deployments, dependency or lockfile
+  changes, or shared external state.
+- \`agents: 4-6\` — reserve for irreversible, security-critical, or
+  organization-wide architecture decisions. Returns diminish sharply past three
+  or four lenses; going higher mostly buys cost.
 
-A useful pairing: high-stakes architectural decision → \`agents: 3-4\` at
-\`thinking: high\`. Routine sanity check → \`agents: 1\` at \`thinking: low\`.
+Otherwise, use \`agents: 1\`. A useful pairing: a qualifying multi-dimensional
+or high-risk decision → \`agents: 3\` at \`thinking: high\`; a routine sanity
+check → \`agents: 1\` at \`thinking: low\`.
 
 ### The response shape
 
@@ -230,7 +236,7 @@ const ThinkParams = Type.Object({
     Type.Integer({
       minimum: 1,
       maximum: MAX_THINK_AGENTS,
-      description: `Panel size: number of independent adversarial critics, each given a distinct expert lens, run in parallel (default 1; max ${MAX_THINK_AGENTS}). Use 3 for real decisions or high-blast-radius execution, 4-6 for the highest-stakes multi-faceted calls. Latency ≈ one critic; token cost scales with the count.`,
+      description: `Panel size: number of independent adversarial critics, each given a distinct expert lens, run in parallel (default 1; max ${MAX_THINK_AGENTS}). Use 3 when at least two apply: expensive to reverse, broad impact, materially different alternatives, unverified assumptions, or multiple failure dimensions; also use 3 for any high-risk security, destructive, production-data, deployment, dependency/lockfile, or shared-state action. Reserve 4-6 for irreversible, security-critical, or organization-wide decisions. Latency ≈ one critic; token cost scales with the count.`,
     }),
   ),
   panel: Type.Optional(
@@ -827,7 +833,7 @@ export default function thinkExtension(pi: ExtensionAPI, ctx: ExtensionContext) 
       "Use think for hard reasoning, architecture tradeoffs, debugging strategy, or when an adversarial second pass would improve the answer.",
       "Pass a complete, self-contained prompt; the think tool only receives the prompt string.",
       "Smart routing is preset to avoid same-provider bias: omit `model` so a critic uses a provider different from yours and panels round-robin across openai-codex, claude-bridge, and xai-auth. Use the model override only when the task requires that exact provider/model.",
-      "Tune `thinking` for depth (off→xhigh) and `agents` for breadth (1→6 distinct expert lenses); use agents:3 for real decisions, 4-6 for the highest-stakes calls.",
+      "Tune `thinking` for depth (off→xhigh) and `agents` for breadth (1→6 lenses). Use agents:3 when at least two apply—expensive reversal, broad impact, materially different alternatives, unverified assumptions, or multiple failure dimensions—or whenever one high-risk security, destructive, production-data, deployment, dependency/lockfile, or shared-state action applies. Otherwise use 1; reserve 4-6 for irreversible, security-critical, or organization-wide decisions.",
       "For custom panels, pass `agentConfig` inline or as a JSON file path, or `panel` to load .agents/think/<name>.json. Structured panel config is mutually exclusive with numeric `agents`; per-agent model values are explicit overrides.",
     ],
     parameters: ThinkParams,
