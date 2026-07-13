@@ -15,7 +15,7 @@ Important options:
 
 ```text
 -p, --prompt <text>       Prompt to send to the critic(s)
--m, --model <provider/id> Model for the sub-agent(s); defaults to Pi settings `defaultProvider`/`defaultModel`
+-m, --model <provider/id> Explicit model override; defaults to smart cross-provider routing
 -t, --thinking <level>    off|minimal|low|medium|high|xhigh
 -a, --agents <count>      Numeric panel size for built-in lenses
     --panel <name|path>    Load .agents/think/<name>.json or an explicit JSON file
@@ -24,9 +24,9 @@ Important options:
     --json                Print the full tool result as JSON
 ```
 
-## Default model
+## Smart model routing
 
-If `--model` is omitted, the CLI reads the user's Pi settings from `$PI_CODING_AGENT_DIR/settings.json`, or `~/.pi/agent/settings.json` when `PI_CODING_AGENT_DIR` is unset. It uses `defaultProvider` + `defaultModel` as `provider/model`. If those settings are absent, it falls back to `xai-auth/grok-composer-2.5-fast`.
+If `--model` is omitted, critics use the available providers from the preset `claude-bridge` → `xai-auth` → `openai-codex` rotation. The standalone CLI has no calling-model provider to avoid. Providers not registered in the CLI's Pi model registry are skipped and the remaining providers continue round-robin. Use `--model` only when every panelist must use a specific provider/model.
 
 ## Saved panel from `.agents/think`
 

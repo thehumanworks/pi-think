@@ -33,7 +33,11 @@ export interface ThinkCliResult {
 
 export type ThinkCliExecute = (
   params: ThinkCliParams,
-  options: { cwd?: string; modelRegistry?: unknown },
+  options: {
+    cwd?: string;
+    modelRegistry?: unknown;
+    callerProvider?: string;
+  },
 ) => Promise<{
   content: Array<{ type: string; text?: string }>;
   details: { error?: string };
@@ -63,7 +67,7 @@ Usage:
 
 Options:
   -p, --prompt <text>       Prompt to send to the critic(s)
-  -m, --model <provider/id> Model for the sub-agent(s) (default: Pi settings defaultProvider/defaultModel; fallback: ${THINK_TOOL_DEFAULT_MODEL})
+  -m, --model <provider/id> Explicit model override (default: smart cross-provider routing; fallback: ${THINK_TOOL_DEFAULT_MODEL})
   -t, --thinking <level>    off|minimal|low|medium|high|xhigh
   -a, --agents <count>      Panel size, clamped by the underlying think tool
       --panel <name|path>    Load .agents/think/<name>.json or an explicit JSON file
@@ -265,7 +269,10 @@ async function defaultThinkCliRuntime(
     import("@earendil-works/pi-coding-agent"),
   ]);
   let services = (await piSdk.createAgentSessionServices({ cwd })) as PiRuntimeServices;
-  const provider = providerFromModelReference(params.model, getThinkDefaultModelReference());
+  const provider = providerFromModelReference(
+    params.model,
+    getThinkDefaultModelReference(),
+  );
 
   if (
     params.panel !== undefined ||

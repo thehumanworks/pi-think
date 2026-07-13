@@ -1,14 +1,20 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { getModel, getModels, type Model } from "@earendil-works/pi-ai";
+import { Context, getModel, getModels, type Model } from "@earendil-works/pi-ai";
 import {
+  ExtensionContext,
   type AgentToolResult,
   type ExtensionAPI,
   type ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
-import { THINKING_LEVELS, THINK_TOOL_DEFAULT_MODEL, type ThinkAgentThinkingLevel } from "./constants";
+import {
+  getThinkModelReferences,
+  THINKING_LEVELS,
+  THINK_TOOL_DEFAULT_MODEL,
+  type ThinkAgentThinkingLevel,
+} from "./constants";
 import { getThinkDefaultModelReference } from "./model-defaults";
 import {
   assignThinkLenses,
@@ -21,7 +27,7 @@ import {
   type ThinkAgentRunResult,
   type ThinkLens,
 } from "./lib/agent";
-export { THINK_TOOL_DEFAULT_MODEL } from "./constants";
+export { getThinkModelReferences, THINK_TOOL_DEFAULT_MODEL } from "./constants";
 export { getThinkDefaultModelReference } from "./model-defaults";
 
 const ThinkThinkingLevelSchema = Type.Union(
@@ -44,9 +50,12 @@ const THINKING_DEEPLY_AWARENESS_PROMPT = `## Thinking Deeply
 You have access to a \`think\` tool that delegates a self-contained prompt to a
 panel of one or more contained reasoning sub-agents through the Pi SDK. Each
 sub-agent is an **adversarial critic**: its job is to find the flaw in your
-plan, not to agree with you. Use \`think\` to **gain confidence before
-high-stakes decisions or high-blast-radius execution** — not as a replacement
-for your own judgment, and not as a ritual.
+plan, not to agree with you. The tool's defaults are deliberately preplanned
+to reduce same-model bias: it routes away from your current provider, and
+multi-agent panels round-robin across \`openai-codex\`, \`claude-bridge\`, and
+\`xai-auth\`. Do not set the optional \`model\` override unless the task
+specifically requires a particular model/provider; overriding defeats that
+cross-provider diversity.
 
 Calling \`think\` on every action is itself a failure mode: it produces
 checklist fatigue, you start skimming the output, and the safety value
@@ -213,7 +222,7 @@ const ThinkParams = Type.Object({
   }),
   model: Type.Optional(
     Type.String({
-      description: `Model for the think sub-agent(s) (provider/id). Default: the Pi defaultProvider/defaultModel in settings.json; fallback: ${THINK_TOOL_DEFAULT_MODEL}`,
+      description: `Explicit provider/id override for every think sub-agent. Normally omit this: smart routing is preset to use a provider different from the caller and panels round-robin across providers. Fallback when the caller is unknown: ${THINK_TOOL_DEFAULT_MODEL}`,
     }),
   ),
   thinking: Type.Optional(ThinkThinkingLevelSchema),
@@ -363,6 +372,7 @@ ${JSON.stringify(outputFormat, null, 2)}`;
 export function resolveThinkPanelConfig(
   params: Pick<ThinkParams, "agentConfig" | "panel" | "agents" | "model" | "thinking">,
   cwd = process.cwd(),
+  callerProvider?: string,
 ): NormalizedThinkPanel | undefined {
   if (params.agentConfig === undefined && params.panel === undefined) return undefined;
   if (params.agents !== undefined) {
@@ -390,6 +400,7 @@ export function resolveThinkPanelConfig(
   }
 
   const lenses = assignThinkLenses(rawAgents.length);
+  const routedModels = getThinkModelReferences(callerProvider, rawAgents.length);
   const agents = rawAgents.map((raw, index): NormalizedThinkPanelAgent => {
     assertPlainObject(raw, `agent config agents[${index}]`);
     const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : lenses[index]!.title;
@@ -404,7 +415,7 @@ export function resolveThinkPanelConfig(
     }
     const modelReference = typeof raw.model === "string" && raw.model.trim()
       ? raw.model.trim()
-      : params.model ?? getThinkDefaultModelReference();
+      : params.model ?? routedModels[index]!;
     const thinkingLevel = (effort ?? params.thinking ?? "off") as ThinkAgentThinkingLevel;
     let prompt = systemPrompt ?? buildThinkSystemPrompt(lenses[index], rawAgents.length);
     if (appendSystemPrompt) prompt = `${prompt}
@@ -543,6 +554,8 @@ export interface ExecuteThinkAgentOptions {
   modelRegistry?: ModelRegistry;
   signal?: AbortSignal;
   createAgent?: CreateThinkAgent;
+  /** Provider of the model invoking think; used only when no model override is supplied. */
+  callerProvider?: string;
 }
 
 interface RunPanelistOptions {
@@ -629,7 +642,23 @@ export async function executeThinkAgent(
   options: ExecuteThinkAgentOptions = {},
 ): Promise<AgentToolResult<ThinkDetails>> {
   const cwd = options.cwd ?? process.cwd();
-  let modelReference = params.model ?? getThinkDefaultModelReference();
+  const requestedPanelSize = clampPanelSize(params.agents);
+  const presetModels = getThinkModelReferences(
+    options.callerProvider,
+    requestedPanelSize,
+  );
+  const availablePresetModels = params.model
+    ? presetModels
+    : presetModels.filter((reference) =>
+        resolveThinkModel(reference, options.modelRegistry),
+      );
+  const routedModels = Array.from(
+    { length: requestedPanelSize },
+    (_, index) =>
+      availablePresetModels[index % availablePresetModels.length] ??
+      presetModels[index]!,
+  );
+  let modelReference = params.model ?? routedModels[0]!;
   let thinkingLevel = params.thinking;
   let panelSize = clampPanelSize(params.agents);
   let details: ThinkDetails = {
@@ -644,13 +673,17 @@ export async function executeThinkAgent(
       throw new Error("Think panel run was cancelled before it started");
     }
 
-    const configuredPanel = resolveThinkPanelConfig(params, cwd);
+    const configuredPanel = resolveThinkPanelConfig(
+      params,
+      cwd,
+      options.callerProvider,
+    );
     const createAgent = options.createAgent ?? ThinkAgent.init;
 
-    const panelAgents = configuredPanel?.agents ?? assignThinkLenses(panelSize).map((lens) => ({
+    const panelAgents = configuredPanel?.agents ?? assignThinkLenses(panelSize).map((lens, index) => ({
       name: lens.title,
       lens,
-      modelReference,
+      modelReference: params.model ?? routedModels[index]!,
       thinkingLevel: (thinkingLevel ?? "off") as ThinkAgentThinkingLevel,
       systemPrompt: buildThinkSystemPrompt(lens, panelSize),
     }));
@@ -676,7 +709,7 @@ export async function executeThinkAgent(
     };
 
     const settled = await Promise.allSettled(
-      panelAgents.map((panelAgent) => {
+      panelAgents.map(async (panelAgent) => {
         const model = resolveThinkModel(panelAgent.modelReference, options.modelRegistry);
         if (!model) {
           throw new Error(`Unable to find Pi model ${panelAgent.modelReference}`);
@@ -706,9 +739,13 @@ export async function executeThinkAgent(
       return {
         lens: panelAgent.lens.key,
         title: panelAgent.name,
+        model: panelAgent.modelReference,
+        thinkingLevel: panelAgent.thinkingLevel,
         error: errorMessage(outcome.reason),
       };
     });
+    details = { ...details, panel };
+
 
     const succeeded = panel.filter((entry) => entry.text !== undefined);
     if (succeeded.length === 0) {
@@ -763,7 +800,22 @@ function previewPrompt(prompt: string): string {
   return `${normalized.slice(0, 77)}...`;
 }
 
-export default function thinkExtension(pi: ExtensionAPI) {
+export function formatThinkPanelStatus(panel: ThinkPanelEntry[]): string {
+  const succeeded = panel.filter((entry) => entry.text !== undefined).length;
+  const failed = panel.length - succeeded;
+  const summary = panel.length > 1
+    ? `Panel of ${panel.length}: ${succeeded} complete${failed > 0 ? ` (${failed} failed)` : ""}`
+    : panel[0]?.error
+      ? "Failed"
+      : "Complete";
+  const models = panel.map((entry, index) => {
+    const seat = panel.length > 1 ? `${index + 1}. ${entry.title}` : entry.title;
+    return `${seat}: ${entry.model ?? "unknown model"}`;
+  });
+  return [summary, ...models].join("\n");
+}
+
+export default function thinkExtension(pi: ExtensionAPI, ctx: ExtensionContext) {
   pi.registerTool<typeof ThinkParams, ThinkDetails>({
     name: "think",
     label: "Think",
@@ -774,9 +826,9 @@ export default function thinkExtension(pi: ExtensionAPI) {
     promptGuidelines: [
       "Use think for hard reasoning, architecture tradeoffs, debugging strategy, or when an adversarial second pass would improve the answer.",
       "Pass a complete, self-contained prompt; the think tool only receives the prompt string.",
+      "Smart routing is preset to avoid same-provider bias: omit `model` so a critic uses a provider different from yours and panels round-robin across openai-codex, claude-bridge, and xai-auth. Use the model override only when the task requires that exact provider/model.",
       "Tune `thinking` for depth (off→xhigh) and `agents` for breadth (1→6 distinct expert lenses); use agents:3 for real decisions, 4-6 for the highest-stakes calls.",
-      "For custom panels, pass `agentConfig` inline or as a JSON file path, or `panel` to load .agents/think/<name>.json. Structured panel config is mutually exclusive with numeric `agents`.",
-      "The think tool is implemented inside Pi via the SDK and does not shell out to a local binary.",
+      "For custom panels, pass `agentConfig` inline or as a JSON file path, or `panel` to load .agents/think/<name>.json. Structured panel config is mutually exclusive with numeric `agents`; per-agent model values are explicit overrides.",
     ],
     parameters: ThinkParams,
 
@@ -807,6 +859,7 @@ export default function thinkExtension(pi: ExtensionAPI) {
         cwd: ctx.cwd,
         modelRegistry: ctx.modelRegistry,
         signal,
+        callerProvider: ctx.model?.provider,
       });
     },
 
@@ -829,27 +882,32 @@ export default function thinkExtension(pi: ExtensionAPI) {
         return new Text(theme.fg("warning", "Thinking..."), 0, 0);
       }
 
-      if (result.details.error) {
-        return new Text(
-          theme.fg("error", `Failed: ${result.details.error}`),
-          0,
-          0,
-        );
-      }
-
       const panel = result.details.panel;
-      if (panel && panel.length > 1) {
-        const ok = panel.filter((entry) => entry.text !== undefined).length;
-        const failed = panel.length - ok;
-        const suffix = failed > 0 ? ` (${failed} failed)` : "";
+      if (result.details.error) {
+        const models = panel?.length
+          ? `\n${formatThinkPanelStatus(panel)}`
+          : result.details.model
+            ? `\nModel: ${result.details.model}`
+            : "";
         return new Text(
-          theme.fg("success", `Panel of ${panel.length}: ${ok} complete${suffix}`),
+          theme.fg("error", `Failed: ${result.details.error}${models}`),
           0,
           0,
         );
       }
 
-      return new Text(theme.fg("success", "Complete"), 0, 0);
+      if (panel?.length) {
+        return new Text(
+          theme.fg("success", formatThinkPanelStatus(panel)),
+          0,
+          0,
+        );
+      }
+
+      const model = result.details.model
+        ? `\nModel: ${result.details.model}`
+        : "";
+      return new Text(theme.fg("success", `Complete${model}`), 0, 0);
     },
   });
 
